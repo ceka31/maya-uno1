@@ -8,6 +8,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Outfit:wght@400;600;700;800;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@r128/examples/js/loaders/GLTFLoader.js"></script>
     <style>
         :root {
             --bg: #0a0008;
@@ -356,6 +357,40 @@
         .cy { background: linear-gradient(135deg, #ffd600, #ffeb3b); }
         .cg { background: linear-gradient(135deg, #00c853, #00e676); }
         .cb { background: linear-gradient(135deg, #2979ff, #64b5f6); }
+
+        /* ─── GLOWS & EFFECTS ─── */
+        @keyframes glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(255,214,0,.3); }
+            50% { box-shadow: 0 0 40px rgba(255,214,0,.6); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        .uno-card:hover:not(.disabled) {
+            animation: glow .6s ease-in-out infinite;
+        }
+
+        .btn-uno:active {
+            animation: pulse .3s ease-in-out;
+        }
+
+        /* Notification shine effect */
+        @keyframes shimmer {
+            0% { background-position: -1000px 0; }
+            100% { background-position: 1000px 0; }
+        }
+
+        .notif {
+            background: linear-gradient(90deg, rgba(0,0,0,.9) 0%, rgba(20,20,20,.9) 50%, rgba(0,0,0,.9) 100%);
+            background-size: 1000px 100%;
+        }
+
+        .notif.success {
+            animation: shimmer 2s infinite;
+        }
     </style>
 </head>
 <body>
@@ -432,6 +467,222 @@
 
         let pendingWildColor = null;
         let selectedCard = null;
+        let audioContext = null;
+        let cards3D = [];
+        let particles = [];
+
+        // ════════════════════════════════════════════════════════════════════════
+        // SOUND EFFECTS (Web Audio API)
+        // ════════════════════════════════════════════════════════════════════════
+        function initAudio() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            return audioContext;
+        }
+
+        function playSound(frequency, duration, type = 'sine') {
+            const ctx = initAudio();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            
+            osc.frequency.value = frequency;
+            osc.type = type;
+            
+            gain.gain.setValueAtTime(0.3, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration);
+            
+            osc.start(ctx.currentTime);
+            osc.stop(ctx.currentTime + duration);
+        }
+
+        function playSoundSequence(notes) {
+            notes.forEach((note, i) => {
+                setTimeout(() => playSound(note.freq, note.dur, note.type || 'sine'), note.delay || 0);
+            });
+        }
+
+        function playCardSound() {
+            playSoundSequence([
+                { freq: 400, dur: 0.1, delay: 0 },
+                { freq: 500, dur: 0.1, delay: 50 }
+            ]);
+        }
+
+        function playUNOSound() {
+            playSoundSequence([
+                { freq: 600, dur: 0.1, delay: 0 },
+                { freq: 800, dur: 0.1, delay: 100 },
+                { freq: 1000, dur: 0.2, delay: 200 }
+            ]);
+        }
+
+        function playWinSound() {
+            playSoundSequence([
+                { freq: 523, dur: 0.15, delay: 0 },
+                { freq: 659, dur: 0.15, delay: 150 },
+                { freq: 784, dur: 0.15, delay: 300 },
+                { freq: 1047, dur: 0.3, delay: 450 }
+            ]);
+        }
+
+        function playDrawSound() {
+            playSound(350, 0.15);
+        }
+
+        // ════════════════════════════════════════════════════════════════════════
+        // PARTICLE EFFECTS
+        // ════════════════════════════════════════════════════════════════════════
+        function createParticle(position, velocity, color, life = 1) {
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, 0, 0]), 3));
+            
+            const material = new THREE.PointsMaterial({
+                size: 0.05,
+                color: new THREE.Color(color),
+                sizeAttenuation: true,
+                transparent: true,
+                opacity: 0.8
+            });
+            
+            const particle = new THREE.Points(geometry, material);
+            particle.position.copy(position);
+            particle.velocity = velocity.clone();
+            particle.life = life;
+            particle.maxLife = life;
+            
+            scene.add(particle);
+            particles.push(particle);
+            
+            return particle;
+        }
+
+        function createExplosion(position, color = 0xffd600) {
+            for (let i = 0; i < 8; i++) {
+                const angle = (i / 8) * Math.PI * 2;
+                const speed = 0.3 + Math.random() * 0.3;
+                const velocity = new THREE.Vector3(
+                    Math.cos(angle) * speed,
+                    Math.random() * 0.5 + 0.2,
+                    Math.sin(angle) * speed
+                );
+                createParticle(position.clone(), velocity, color, 0.8);
+            }
+        }
+
+        function updateParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.life -= 0.016; // ~60fps
+                
+                if (p.life <= 0) {
+                    scene.remove(p);
+                    particles.splice(i, 1);
+                } else {
+                    p.position.add(p.velocity);
+                    p.velocity.y -= 0.01; // gravity
+                    p.material.opacity = (p.life / p.maxLife) * 0.8;
+                }
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════════════
+        // 3D CARDS
+        // ════════════════════════════════════════════════════════════════════════
+        function create3DCard(card, position, rotation = { x: 0, y: 0, z: 0 }) {
+            const colors = {
+                red: 0xff3b3b,
+                yellow: 0xffd600,
+                green: 0x00c853,
+                blue: 0x2979ff,
+                wild: 0xa64dff
+            };
+
+            const geometry = new THREE.BoxGeometry(0.4, 0.6, 0.02);
+            
+            // Card face
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 384;
+            const ctx = canvas.getContext('2d');
+            
+            ctx.fillStyle = '#' + colors[card.color].toString(16).padStart(6, '0');
+            ctx.fillRect(0, 0, 256, 384);
+            ctx.fillStyle = 'rgba(255,255,255,0.1)';
+            ctx.fillRect(10, 10, 236, 364);
+            
+            ctx.fillStyle = card.color === 'yellow' ? '#000' : '#fff';
+            ctx.font = 'bold 80px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            
+            const text = card.value === 'skip' ? '⏭️' : 
+                        card.value === 'reverse' ? '🔄' : 
+                        card.value === 'draw2' ? '+2' : 
+                        card.value === 'wild' ? '🔮' : 
+                        card.value === 'draw4' ? '+4' : card.value;
+            
+            ctx.fillText(text, 128, 192);
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            const material = new THREE.MeshStandardMaterial({ 
+                map: texture,
+                roughness: 0.4,
+                metalness: 0.1
+            });
+            
+            const backMaterial = new THREE.MeshStandardMaterial({
+                color: 0x333333,
+                roughness: 0.6
+            });
+            
+            const cardMesh = new THREE.Mesh(geometry, [
+                backMaterial,  // back
+                backMaterial,  // front
+                backMaterial,  // top
+                backMaterial,  // bottom
+                material,      // right (front)
+                backMaterial   // left
+            ]);
+            
+            cardMesh.position.copy(position);
+            cardMesh.rotation.set(rotation.x, rotation.y, rotation.z);
+            cardMesh.castShadow = true;
+            cardMesh.receiveShadow = true;
+            cardMesh.card = card;
+            
+            scene.add(cardMesh);
+            cards3D.push(cardMesh);
+            
+            return cardMesh;
+        }
+
+        function animateCardPlay(cardMesh, targetPos, callback) {
+            const startPos = cardMesh.position.clone();
+            const startRot = cardMesh.rotation.clone();
+            let progress = 0;
+
+            function animate3D() {
+                progress += 0.05;
+                if (progress >= 1) {
+                    cardMesh.position.copy(targetPos);
+                    cardMesh.rotation.set(startRot.x, startRot.y, startRot.z);
+                    if (callback) callback();
+                    return;
+                }
+
+                cardMesh.position.lerpVectors(startPos, targetPos, progress);
+                cardMesh.rotation.y = startRot.y + Math.sin(progress * Math.PI) * 0.5;
+                cardMesh.position.y += Math.sin(progress * Math.PI) * 0.3;
+                
+                requestAnimationFrame(animate3D);
+            }
+
+            animate3D();
+        }
 
         // ════════════════════════════════════════════════════════════════════════
         // 3D SCENE
@@ -541,6 +792,14 @@
                 table.rotation.y += 0.0005;
             }
 
+            // Update particles
+            updateParticles();
+
+            // Animate cards slight bobbing
+            cards3D.forEach((card, i) => {
+                card.position.y = card.baseY + Math.sin(Date.now() * 0.001 + i * 0.3) * 0.05;
+            });
+
             renderer.render(scene, camera);
         }
 
@@ -609,8 +868,14 @@
                 pendingWildId = cardId;
                 document.getElementById('colorModal').classList.add('show');
             } else {
-                // Emit play_card to server
-                console.log('Playing card:', card);
+                // Play card with effects
+                playCardSound();
+                createExplosion(new THREE.Vector3(0, 0.5, 0), 0xffd600);
+                
+                // Create 3D card on table
+                const card3d = create3DCard(card, new THREE.Vector3(0, 0.5, 0), { x: Math.random() * 0.2, y: Math.random() * 0.2, z: Math.random() * 0.2 });
+                card3d.baseY = 0.5;
+                
                 notify(`${card.value} oynandı! 🎴`, 'success');
                 selectedCard = null;
                 renderHand();
@@ -621,19 +886,28 @@
             // Find card with pending wild color
             const card = gameState.hand.find(c => c.id === pendingWildId);
             if (card) {
-                console.log('Selected color:', color, 'for card:', card);
-                notify(`${color === 'red' ? '🔴' : color === 'yellow' ? '🟡' : color === 'green' ? '🟢' : '🔵'} Renk seçildi!`, 'success');
+                playUNOSound();
+                createExplosion(new THREE.Vector3(0, 0.5, 0), color === 'red' ? 0xff3b3b : color === 'yellow' ? 0xffd600 : color === 'green' ? 0x00c853 : 0x2979ff);
+                
+                const card3d = create3DCard(card, new THREE.Vector3(0, 0.5, 0), { x: Math.random() * 0.2, y: Math.random() * 0.2, z: Math.random() * 0.2 });
+                card3d.baseY = 0.5;
+                
+                const colorEmoji = color === 'red' ? '🔴' : color === 'yellow' ? '🟡' : color === 'green' ? '🟢' : '🔵';
+                notify(`${colorEmoji} Renk seçildi!`, 'success');
             }
             document.getElementById('colorModal').classList.remove('show');
             pendingWildId = null;
         }
 
         function drawCard() {
-            console.log('Drawing card...');
+            playDrawSound();
+            createExplosion(new THREE.Vector3(-0.5, 0.5, 0.5), 0x2979ff);
             notify('Kart çekildi 🎴', 'info');
         }
 
         function callUNO() {
+            playUNOSound();
+            createExplosion(new THREE.Vector3(0, 1, 0), 0xff3b3b);
             notify('UNO! 🔥', 'success');
         }
 
@@ -686,6 +960,47 @@
 
         // Start on load
         init();
+
+        // Display cards on table after model loads
+        setTimeout(() => {
+            // Top card on table
+            const topCard = create3DCard(
+                { color: 'yellow', value: '3' },
+                new THREE.Vector3(0, 0.5, 0),
+                { x: 0.1, y: 0.5, z: 0.1 }
+            );
+            topCard.baseY = 0.5;
+
+            // Deck cards (stacked)
+            for (let i = 0; i < 5; i++) {
+                const deck = create3DCard(
+                    { color: 'wild', value: 'wild' },
+                    new THREE.Vector3(-0.8 + i * 0.02, 0.5 + i * 0.02, -0.5),
+                    { x: 0.1, y: 0, z: 0.1 }
+                );
+                deck.baseY = 0.5 + i * 0.02;
+            }
+
+            // Player position cards (around table)
+            const positions = [
+                new THREE.Vector3(1.2, 0.5, 0),
+                new THREE.Vector3(0, 0.5, 1.2),
+                new THREE.Vector3(-1.2, 0.5, 0)
+            ];
+
+            positions.forEach((pos, i) => {
+                for (let j = 0; j < 3; j++) {
+                    const playerCard = create3DCard(
+                        { color: ['red', 'blue', 'green'][i], value: String(j) },
+                        new THREE.Vector3(pos.x, pos.y + j * 0.08, pos.z),
+                        { x: 0.1, y: (i * 120 * Math.PI / 180), z: 0.1 }
+                    );
+                    playerCard.baseY = pos.y + j * 0.08;
+                }
+            });
+
+            notify('🎲 Masa hazır!', 'info');
+        }, 2000);
     </script>
 </body>
 </html>
